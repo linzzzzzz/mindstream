@@ -51,3 +51,8 @@ processed_videos/
 .idea/
 *.swp
 *.swo
+
+# Team Dev Config (synced from mindstream-dev-config)
+AGENTS.md
+CLAUDE.md
+.kiro/
