@@ -9,6 +9,11 @@ Use OpenClaw's browser automation to search YouTube and scrape video results.
 
 This skill performs multiple searches (one per person + keyword combination) and combines results into a single JSON file.
 
+## Paths
+
+- **Data directory**: `/Users/alexsmini/.openclaw/workspace/mindstream/data`
+- **Database**: `/Users/alexsmini/.openclaw/workspace/mindstream/mindstream.db`
+
 ## Search Configuration
 
 The caller provides a list of people and keywords to search for. Example:
@@ -43,16 +48,18 @@ After ALL searches complete:
 
 This skill runs **multiple searches** in sequence. Each search goes through steps 1-5, then step 6 consolidates everything.
 
+**Before starting**: Generate a single run timestamp (e.g., `2026-03-02T14-30-00`) to use consistently across all intermediate and combined files for this run.
+
 ```
 For each (person, keyword) pair (steps 1-5):
   1. Navigate to YouTube with search query
   2. Wait for results
   3. Extract video data
   4. Filter by duration
-  5. Save intermediate JSON file
-  
+  5. Save intermediate JSON file (with run timestamp)
+
 After ALL searches (step 6):
-  6. Combine all results into one final JSON file
+  6. Combine all results into one final JSON file (with same run timestamp)
 ```
 
 ### Step 1: Navigate to YouTube Search
@@ -73,12 +80,7 @@ https://www.youtube.com/results?search_query=Sam+Altman+interview+duration:long+
 
 ### Step 2: Wait for Results
 
-Wait 3-5 seconds for the page to fully load.
-
-```typescript
-// Example wait
-await new Promise(r => setTimeout(r, 3000));
-```
+Wait 3-5 seconds for the page to fully load before extracting data.
 
 ### Step 3: Extract Video Data
 
@@ -104,154 +106,85 @@ Convert duration to seconds:
 - `4:30` → 270 seconds ❌ (skip)
 - `1:30:00` → 5400 seconds ✅ (keep)
 
-```typescript
-// Filter out short videos
-const MIN_DURATION = 300; // 5 minutes
-const filtered = videos.filter(v => v.durationSeconds >= MIN_DURATION);
-```
+Discard any video where `durationSeconds < 300`.
 
 ### Step 5: Save Intermediate JSON File
 
-After EACH search: save an intermediate file. After ALL searches: combine into one final file.
+After extracting and filtering data for this search, use your **file write tool** to save:
 
-```typescript
-import fs from 'fs';
-import path from 'path';
+- **Path**: `/Users/alexsmini/.openclaw/workspace/mindstream/data/scrape-{thoughtLeader}-{keyword}-{timestamp}.json`
+  (e.g., `scrape-Sam-Altman-interview-2026-03-02T14-30-00.json` — replace spaces with hyphens, use the run timestamp from the start)
+- **Content**:
 
-const outputDir = '/Users/alexsmini/.openclaw/workspace/mindstream-static/data';
-const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-
-// Ensure directory exists
-if (!fs.existsSync(outputDir)) {
-  fs.mkdirSync(outputDir, { recursive: true });
-}
-
-// Track all search results
-const allSearchResults = [];
-
-// === After EACH search (run 8 times) ===
-function saveSearchResult(searchResult) {
-  allSearchResults.push(searchResult);
-  
-  // Save individual file (for debugging/resilience)
-  const individualFilename = `scrape-${searchResult.thoughtLeader.replace(/\s+/g, '-')}-${searchResult.keyword}.json`;
-  fs.writeFileSync(path.join(outputDir, individualFilename), JSON.stringify(searchResult, null, 2));
-}
-
-// === After ALL searches complete ===
-function saveCombinedFile() {
-  // Combine all videos
-  const allVideos = [];
-  
-  for (const searchResult of allSearchResults) {
-    for (const video of searchResult.videos) {
-      allVideos.push({
-        ...video,
-        thoughtLeader: searchResult.thoughtLeader
-      });
+```json
+{
+  "thoughtLeader": "Sam Altman",
+  "keyword": "interview",
+  "query": "Sam Altman interview after:2026-01-01 duration:long",
+  "videos": [
+    {
+      "title": "...",
+      "url": "https://www.youtube.com/watch?v=xxx",
+      "thumbnail": "https://img.youtube.com/vi/xxx/maxresdefault.jpg",
+      "channel": "...",
+      "views": "1.2M views",
+      "viewCount": 1200000,
+      "date": "2 days ago",
+      "duration": "12:34",
+      "durationSeconds": 754,
+      "thoughtLeader": "Sam Altman"
     }
-  }
-  
-  const combined = {
-    scrapedAt: new Date().toISOString(),
-    searchCount: allSearchResults.length,
-    totalVideos: allVideos.length,
-    searches: allSearchResults.map(s => ({
-      thoughtLeader: s.thoughtLeader,
-      keyword: s.keyword,
-      query: s.query,
-      videoCount: s.videos.length
-    })),
-    videos: allVideos
-  };
-  
-  // Save combined file (final output)
-  const combinedFilename = `scrape-${timestamp}.json`;
-  fs.writeFileSync(path.join(outputDir, combinedFilename), JSON.stringify(combined, null, 2));
-  
-  console.log(`✅ Saved ${allVideos.length} videos to ${combinedFilename}`);
-  console.log(`   (${allSearchResults.length} searches combined)`);
+  ]
 }
 ```
 
 **Key points:**
-- After each individual search → save `scrape-Sam-Altman-interview.json`
+- After each individual search → save `scrape-Sam-Altman-interview-{timestamp}.json` (same timestamp for all files in this run)
 - After ALL 8 searches → save combined `scrape-{timestamp}.json` as final output
 - Each video tagged with `thoughtLeader`
 
-> **Repeat steps 1-5** for each person + keyword combination.
+> **Repeat steps 1-5** for each person + keyword combination. Once ALL searches are complete, proceed to **Step 6**.
 
 
 ### Step 6: Combine All Results (After ALL Searches)
 
-After running steps 1-5 for ALL searches, combine into one final JSON file:
+After all searches are done, use your **file write tool** to save one final combined file:
 
-```typescript
-// This runs ONCE after all 8 searches are complete
-function saveCombinedFile() {
-  const allVideos = [];
-  
-  // Collect all videos from all searches
-  for (const searchResult of allSearchResults) {
-    for (const video of searchResult.videos) {
-      allVideos.push({
-        ...video,
-        thoughtLeader: searchResult.thoughtLeader
-      });
-    }
-  }
-  
-  const combined = {
-    scrapedAt: new Date().toISOString(),
-    searchCount: allSearchResults.length,
-    totalVideos: allVideos.length,
-    searches: allSearchResults.map(s => ({
-      thoughtLeader: s.thoughtLeader,
-      keyword: s.keyword,
-      query: s.query,
-      videoCount: s.videos.length
-    })),
-    videos: allVideos
-  };
-  
-  const combinedFilename = `scrape-${timestamp}.json`;
-  fs.writeFileSync(path.join(outputDir, combinedFilename), JSON.stringify(combined, null, 2));
-  
-  console.log(`✅ Saved ${allVideos.length} videos to ${combinedFilename}`);
-  console.log(`   (${allSearchResults.length} searches combined)`);
+- **Path**: `/Users/alexsmini/.openclaw/workspace/mindstream/data/scrape-{timestamp}.json`
+  (e.g., `scrape-2026-03-02T12-00-00.json` — use current datetime, replacing `:` and `.` with `-`)
+- **Content**: Merge all videos from all intermediate files, deduplicate by URL:
+
+```json
+{
+  "scrapedAt": "<current ISO timestamp>",
+  "searchCount": 8,
+  "totalVideos": 24,
+  "searches": [
+    { "thoughtLeader": "Sam Altman", "keyword": "interview", "query": "...", "videoCount": 3 },
+    { "thoughtLeader": "Sam Altman", "keyword": "podcast", "query": "...", "videoCount": 3 }
+  ],
+  "videos": [
+    { "...all videos from all searches, each with thoughtLeader field..." }
+  ]
 }
 ```
 
 ### Video Object Structure
 
-Each video should have:
+Each video in the `videos` array must have these fields:
 
-```typescript
-interface ScrapeVideo {
-  title: string;           // Video title
-  url: string;             // YouTube watch URL (https://youtube.com/watch?v=xxx)
-  thumbnail: string;       // Thumbnail URL (https://img.youtube.com/vi/xxx/maxresdefault.jpg)
-  channel: string;         // Channel name (e.g., "Lex Fridman", "TED", "OpenAI")
-  views: string;           // View count as string (e.g., "1.2M views")
-  viewCount: number;       // View count as number (e.g., 1200000)
-  date: string;            // Upload date (e.g., "2 days ago", "1 year ago")
-  duration: string;        // Duration (e.g., "12:34", "1:30:00")
-  durationSeconds: number; // Duration in seconds (e.g., 754)
-  thoughtLeader: string;   // Person name (e.g., "Sam Altman") - IMPORTANT
-}
-
-// Example video object:
+```json
 {
-  title: "Sam Altman Unfiltered: ChatGPT, AI Risks & What's Coming Next",
-  url: "https://www.youtube.com/watch?v=qH7thwrCluM",
-  thumbnail: "https://img.youtube.com/vi/qH7thwrCluM/maxresdefault.jpg",
-  channel: "OpenAI",
-  views: "338K views",
-  viewCount: 338000,
-  date: "3 days ago",
-  duration: "59:56",
-  durationSeconds: 3596,
-  thoughtLeader: "Sam Altman"
+  "title": "Sam Altman Unfiltered: ChatGPT, AI Risks & What's Coming Next",
+  "url": "https://www.youtube.com/watch?v=qH7thwrCluM",
+  "thumbnail": "https://img.youtube.com/vi/qH7thwrCluM/maxresdefault.jpg",
+  "channel": "OpenAI",
+  "views": "338K views",
+  "viewCount": 338000,
+  "date": "3 days ago",
+  "duration": "59:56",
+  "durationSeconds": 3596,
+  "thoughtLeader": "Sam Altman"
 }
 ```
 
@@ -295,8 +228,8 @@ Use these operators to get better results:
 - Click "Videos" filter if you only want full videos (not Shorts)
 - Sort by upload date for latest content
 - **ALWAYS filter out videos shorter than 5 minutes (300 seconds)** - these are likely Shorts/clips, not full talks
-- After EACH search: save intermediate JSON file
-- After ALL searches: combine into ONE final JSON file (skill's output)
+- After EACH search: save intermediate JSON file using your file write tool
+- After ALL searches: save ONE final combined JSON file using your file write tool
 
 ## Quick Reference
 
@@ -304,7 +237,8 @@ Use these operators to get better results:
 URL: https://www.youtube.com/results?search_query={QUERY}
 Wait: 2-3 seconds
 Extract: title, url, thumbnail, channel, views, date, duration
-Filter: duration >= 300 seconds
-Save to: data/scrape-{timestamp}.json
+Filter: durationSeconds >= 300
+Save each search to: /Users/alexsmini/.openclaw/workspace/mindstream/data/scrape-{Name}-{keyword}-{timestamp}.json
+Save combined to:    /Users/alexsmini/.openclaw/workspace/mindstream/data/scrape-{timestamp}.json
 Close tabs: When finished
 ```
