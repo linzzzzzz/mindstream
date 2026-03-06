@@ -1,0 +1,9 @@
+[project]
+name = "mindstream-scripts"
+version = "0.1.0"
+description = "Mindstream pipeline scripts"
+requires-python = ">=3.11"
+dependencies = [
+    "bilibili-api-python>=17.0.0",
+    "aiohttp>=3.9.0",
+]

@@ -157,7 +157,7 @@ def time_str_to_seconds(time_str: str) -> int:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-async def process_video(video: dict, conn: sqlite3.Connection, skip_download: bool = False) -> bool:
+async def process_video(video: dict, conn: sqlite3.Connection, skip_download: bool = False, skip_transcript: bool = False, skip_analysis: bool = False) -> bool:
     video_id = video["id"]
     video_url = video["url"]
     leader_name = video["leader_name"]
@@ -189,9 +189,12 @@ async def process_video(video: dict, conn: sqlite3.Connection, skip_download: bo
             generate_clips=True,
             add_titles=False,
             generate_cover=False,
+            burn_subtitles=True,
+            subtitle_translation="Simplified Chinese",
+            skip_analysis=skip_analysis,
         )
 
-        result = await orchestrator.process_video(video_url, skip_download=skip_download)
+        result = await orchestrator.process_video(video_url, skip_download=skip_download, skip_transcript=skip_transcript)
 
         if not result.success:
             raise RuntimeError(result.error_message or "VideoOrchestrator failed")
@@ -221,6 +224,33 @@ async def process_video(video: dict, conn: sqlite3.Connection, skip_download: bo
         engaging_result = result.engaging_moments_analysis or {}
         insights = engaging_result.get("insights", [])
 
+        # When --skip-analysis is used, the orchestrator only stores the file path.
+        # top_engaging_moments.json is an intermediate ClipGenerator format where
+        # "title" is truncated to 80 chars for use as filenames — never use it as
+        # the source of truth. Prefer top_insights.json or all_insights.json which
+        # have the full claim text.
+        if not insights and engaging_result.get("aggregated_file"):
+            import json as _json
+            try:
+                aggregated_path = Path(engaging_result["aggregated_file"])
+                splits_dir = aggregated_path.parent
+
+                top_insights_path = splits_dir / "top_insights.json"
+                all_insights_path = splits_dir / "all_insights.json"
+
+                if top_insights_path.exists():
+                    raw = _json.loads(top_insights_path.read_text())
+                    insights = raw.get("insights", [])
+                    logger.info(f"  Loaded {len(insights)} insights from top_insights.json")
+                elif all_insights_path.exists():
+                    raw = _json.loads(all_insights_path.read_text())
+                    insights = raw.get("insights", [])
+                    logger.info(f"  Loaded {len(insights)} insights from all_insights.json")
+                else:
+                    logger.warning("  top_insights.json and all_insights.json not found; skipping insights")
+            except Exception as exc:
+                logger.warning(f"  Could not read analysis file: {exc}")
+
         if not insights:
             logger.warning("  No insights extracted")
             update_status(conn, video_id, "insights_extracted")
@@ -237,12 +267,29 @@ async def process_video(video: dict, conn: sqlite3.Connection, skip_download: bo
         update_status(conn, video_id, "insights_extracted")
 
         # ------------------------------------------------------------------
-        # Report clip generation
+        # Report clip generation and store clip filenames
         # ------------------------------------------------------------------
         generated = 0
         if result.clip_generation:
             generated = result.clip_generation.get("successful_clips", 0)
+            clips_info = result.clip_generation.get("clips_info", [])
+            # Build rank → filename map (rank is 1-based, order_index is 0-based)
+            rank_to_filename = {c["rank"]: c["filename"] for c in clips_info if "rank" in c and "filename" in c}
+            if rank_to_filename:
+                for idx in range(len(insights)):
+                    filename = rank_to_filename.get(idx + 1)
+                    if filename:
+                        conn.execute(
+                            "UPDATE insights SET clip_filename = ?, updated_at = ? WHERE content_item_id = ? AND order_index = ?",
+                            (filename, datetime.now().isoformat(), video_id, idx),
+                        )
+                conn.commit()
         logger.info(f"  {generated}/{len(insights)} clips generated")
+
+        if result.post_processing:
+            pp = result.post_processing
+            logger.info(f"  {pp.get('successful_clips', 0)}/{pp.get('total_clips', 0)} subtitle clips burned → {pp.get('output_dir', '')}")
+
         update_status(conn, video_id, "clips_generated")
 
         return True
@@ -260,6 +307,8 @@ async def main() -> None:
     parser.add_argument("--limit", type=int, default=5, help="Max videos to process (default: 5)")
     parser.add_argument("--video-id", help="Process a specific video ID regardless of status")
     parser.add_argument("--skip-download", action="store_true", help="Skip download, use existing video")
+    parser.add_argument("--skip-transcript", action="store_true", help="Skip transcription, use existing SRT")
+    parser.add_argument("--skip-analysis", action="store_true", help="Skip insight extraction, use existing all_insights.json")
     args = parser.parse_args()
 
     conn = get_db()
@@ -286,7 +335,7 @@ async def main() -> None:
     logger.info(f"Processing {len(rows)} video(s)...\n")
     results = []
     for row in rows:
-        ok = await process_video(dict(row), conn, skip_download=args.skip_download)
+        ok = await process_video(dict(row), conn, skip_download=args.skip_download, skip_transcript=args.skip_transcript, skip_analysis=args.skip_analysis)
         results.append(ok)
 
     logger.info(f"\nDone: {sum(results)}/{len(rows)} succeeded")

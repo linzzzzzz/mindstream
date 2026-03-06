@@ -10,6 +10,18 @@ import fs from 'fs';
 const DB_PATH = path.join(__dirname, '../mindstream.db');
 const OUTPUT_PATH = path.join(__dirname, '../public/videos.json');
 
+interface Insight {
+  id: string;
+  orderIndex: number;
+  claim: string;
+  quote: string;
+  topic: string;
+  startSeconds: number;
+  endSeconds: number;
+  clipUrl: string | null;
+  concatStartSeconds: number | null;
+}
+
 interface Video {
   id: string;
   title: string;
@@ -30,6 +42,8 @@ interface Video {
     verified: boolean;
   };
   url: string;
+  concatClipUrl: string | null;
+  insights: Insight[];
 }
 
 interface ExportData {
@@ -75,6 +89,7 @@ function main() {
       ci.duration_seconds,
       ci.view_count,
       ci.url,
+      ci.concat_clip_url,
       tl.id as leader_id,
       tl.name as leader_name,
       tl.verified
@@ -82,6 +97,31 @@ function main() {
     JOIN thought_leaders tl ON ci.thought_leader_id = tl.id
     ORDER BY ci.published_at DESC
   `).all() as any[];
+
+  // Query all insights and group by video
+  const insightRows = db.prepare(`
+    SELECT id, content_item_id, order_index, claim, quote, topic,
+           start_seconds, end_seconds, clip_url, concat_start_seconds
+    FROM insights
+    ORDER BY content_item_id, order_index
+  `).all() as any[];
+
+  const insightsByVideo = new Map<string, Insight[]>();
+  for (const r of insightRows) {
+    const list = insightsByVideo.get(r.content_item_id) ?? [];
+    list.push({
+      id: r.id,
+      orderIndex: r.order_index,
+      claim: r.claim,
+      quote: r.quote || '',
+      topic: r.topic || '',
+      startSeconds: r.start_seconds || 0,
+      endSeconds: r.end_seconds || 0,
+      clipUrl: r.clip_url || null,
+      concatStartSeconds: r.concat_start_seconds ?? null,
+    });
+    insightsByVideo.set(r.content_item_id, list);
+  }
 
   const videos: Video[] = rows.map((row) => ({
     id: row.id,
@@ -103,6 +143,8 @@ function main() {
       verified: !!row.verified,
     },
     url: row.url,
+    concatClipUrl: row.concat_clip_url || null,
+    insights: insightsByVideo.get(row.id) ?? [],
   }));
 
   const exportData: ExportData = {

@@ -31,6 +31,9 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Bilibili credentials (never commit)
+.bilibili_creds.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -56,3 +59,4 @@ processed_videos/
 AGENTS.md
 CLAUDE.md
 .kiro/
+mindstream-dev-config/

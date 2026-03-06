@@ -72,6 +72,9 @@ uv run python /path/to/mindstream/scripts/process_insights.py --video-id qH7thwr
 
 # Skip re-downloading if the video is already on disk
 uv run python /path/to/mindstream/scripts/process_insights.py --skip-download --video-id qH7thwrCluM
+
+# Skip transcription too — use existing SRT files in splits/ (useful for tuning insight prompts)
+uv run python /path/to/mindstream/scripts/process_insights.py --skip-download --skip-transcript --video-id qH7thwrCluM
 ```
 
 If openclip is not in the default sibling location, set the `OPENCLIP_DIR` environment variable:
@@ -85,10 +88,11 @@ OPENCLIP_DIR=/custom/path/to/openclip uv run python .../process_insights.py
 | Step | Status written to DB | What happens |
 |------|----------------------|--------------|
 | 1 | `downloading` | Downloads video + YouTube captions via yt-dlp (skipped if `--skip-download` and video exists) |
-| 2 | — | Speaker diarization via WhisperX (only if WhisperX installed AND reference audio exists; fails hard on error) |
-| 3 | `transcript_fetched` | Saves SRT file path to `transcripts` table |
+| 2 | — | Splits video into parts; speaker diarization via WhisperX (skipped if `--skip-transcript`; diarization only if WhisperX installed AND reference audio exists) |
+| 3 | `transcript_fetched` | Saves SRT file path to `transcripts` table (uses existing SRT from `splits/` if `--skip-transcript`) |
 | 4 | `extracting_insights` → `insights_extracted` | Sends transcript to LLM, extracts insight cards into `insights` table |
-| 5 | `clips_generated` | Generates MP4 clips for each insight |
+| 5 | — | Generates MP4 clips for each insight (with per-clip `.srt` files) |
+| 6 | `clips_generated` | Burns SRT subtitles into `clips_post_processed/`; if `subtitle_translation` is set, translates EN → ZH via Qwen and burns both tracks as bilingual subtitles |
 
 ### Processing status values
 
@@ -118,8 +122,13 @@ data/processed_videos/{safe_video_title}/
 │   ├── insights_part01.json      ← per-part raw insights
 │   ├── all_insights.json         ← merged insights (mindstream format)
 │   └── top_engaging_moments.json ← ClipGenerator-compatible format
-└── clips/
-    ├── rank_01_{claim}.mp4       ← insight clip
+├── clips/
+│   ├── rank_01_{claim}.mp4       ← insight clip (raw)
+│   ├── rank_01_{claim}.srt       ← per-clip English subtitle
+│   ├── rank_02_{claim}.mp4
+│   └── ...
+└── clips_post_processed/
+    ├── rank_01_{claim}.mp4       ← EN + ZH subtitles burned in
     ├── rank_02_{claim}.mp4
     └── ...
 ```
@@ -143,7 +152,7 @@ SQLite database at `mindstream.db`. Key tables:
 - **`thought_leaders`** — Sam Altman, Andrej Karpathy, etc.
 - **`content_items`** — scraped video metadata + `processing_status`
 - **`transcripts`** — path to SRT file per video
-- **`insights`** — extracted insight cards: `claim`, `quote`, `start_seconds`, `end_seconds`, `topic`, `clip_url`
+- **`insights`** — extracted insight cards: `claim`, `quote`, `start_seconds`, `end_seconds`, `topic`, `clip_filename`, `clip_url`
 - **`topics`** — topic taxonomy
 
 To inspect:
@@ -158,14 +167,46 @@ sqlite> SELECT claim, topic FROM insights WHERE content_item_id = 'VIDEO_ID';
 
 ## Uploading clips to Bilibili
 
-After clips are generated (`clips_generated` status), upload each clip to Bilibili and store the embed URL back in the database:
+After clips are generated (`clips_generated` status), use `scripts/upload_to_bilibili.py` to upload each clip and write the Bilibili embed URL back to the database.
 
-```sql
-UPDATE insights SET clip_url = 'https://player.bilibili.com/player.html?bvid=BV...'
-WHERE id = 'INSIGHT_ID';
+### Credentials
 
-UPDATE content_items SET processing_status = 'published'
-WHERE id = 'VIDEO_ID';
+Create `.bilibili_creds.json` (git-ignored) from the example template:
+
+```bash
+cp .bilibili_creds.json.example .bilibili_creds.json
+# then fill in sessdata, bili_jct, buvid3, buvid4
+# Log into bilibili.com → F12 → Application → Cookies → bilibili.com
 ```
 
-See [docs/BILIBILI_UPLOAD_RESEARCH.md](docs/BILIBILI_UPLOAD_RESEARCH.md) for upload research and notes.
+Or set env vars instead: `BILIBILI_SESSDATA`, `BILIBILI_BILI_JCT`, `BILIBILI_BUVID3`.
+
+### Running the uploader
+
+Run from the mindstream directory:
+
+```bash
+cd /path/to/mindstream
+
+# Dry run — preview titles, filenames, tags without calling the API
+uv run python scripts/upload_to_bilibili.py --video-id qH7thwrCluM --dry-run
+
+# Upload all clips for a video
+uv run python scripts/upload_to_bilibili.py --video-id qH7thwrCluM
+
+# Limit clips per run and add delay between uploads (recommended for new accounts)
+uv run python scripts/upload_to_bilibili.py --video-id qH7thwrCluM --max-clips 2 --delay 30
+
+# Process up to 5 videos with clips_generated status (default)
+uv run python scripts/upload_to_bilibili.py
+```
+
+### What it does
+
+- Uploads each `clips_post_processed/rank_NN_*.mp4` as a separate Bilibili video
+- Title: `"{Thought Leader}: {claim}"` (truncated to 80 chars at word boundary)
+- Description: verbatim quote + original YouTube URL
+- Tags: insight topic, leader last name, video topics, "AI" (max 10)
+- Cover: YouTube thumbnail
+- On success: writes `insights.clip_url` and sets `content_items.processing_status = 'published'`
+- Idempotent: skips clips where `clip_url` is already set; safe to re-run after partial failures
